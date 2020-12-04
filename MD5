@@ -1,0 +1,14 @@
+ee0c5a02865e34c4f5f5194768cbb2b8 *DESCRIPTION
+5551061ea4faf92dc4ee6eb8630d6e86 *LICENSE
+00078d3bee0e9ba45d297b25c1d7380b *NAMESPACE
+23bf9ccd42952c03dbe4d7e5a5762c3f *R/addBackCalcAKI.R
+42b30c6d4c5a8803614ef98edcb17263 *R/addRollingWindowAKI.R
+5cb67e8ad91d86d0d1a771178ab8425f *R/data.R
+7d87fc873e0558a3fc7a1f629b639eaa *README.md
+58c2aa1b61c83ab86c46eaf6d049d162 *data/toy.csv
+63f444745d0cf9b2ac36477cd91bb0c9 *data/toy.rda
+56ef0eac0ddb864a6d6df2bad171ab2a *man/addBackCalcAKI.Rd
+4f26e9efd1cc449cd8402550abfbaf4c *man/addRollingWindowAKI.Rd
+3902c45dd5f12300a4562a54d6019803 *man/toy.Rd
+54e0640271acd8d2c63a036daba7f533 *tests/testthat.R
+87102ec5736634e92062bf0217a1ebe3 *tests/testthat/test-addRollingWindowAKI.R
