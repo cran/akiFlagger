@@ -1,41 +1,8 @@
-#' Flag patients for AKI
-#'
-#' Add in the AKI column in a patient dataframe according to the  KDIGO criterion
-#'
-#' @param dataframe patient dataset
-#' @param HB_trumping boolean on whether to have historical baseline creatinine values trump the local minimum creatinine values
-#' @param eGFR_impute boolean on whether to impute missing baseline creatinine values with CKD-EPI equation
-#' @param window1 rolling window length of the shorter time window; defaults to 48 hours
-#' @param window2 rolling window length of the longer time window; defaults to 162 hours
-#' @param padding padding to add to rolling windows; defaults to 0 hours
-#' @param add_min_creat boolean on whether to add the intermediate columns generated during calculation
-#' @param add_baseline_creat boolean on whether to add the baseline creatinine values in
-#' @param add_imputed_admission boolean on whether to add the imputed admission column in
-#' @param add_imputed_encounter boolean on whether to add the imputer encounter id column in
-#'
-#' @return patient dataset with AKI column added in
-#'
-#' #Imports
-#' @import zoo
-#' @importFrom dplyr select
-#' @importFrom dplyr between
-#' @importFrom dplyr %>%
-#'
-#' @importFrom data.table fread
-#' @importFrom data.table first
-#' @importFrom data.table last
-#' @importFrom data.table copy
-#' @importFrom data.table shift
-#' @importFrom data.table :=
-#' @importFrom data.table .SD
-#' @importFrom data.table .GRP
-#'
-#' @importFrom stats median
-#'
-#' @export
-#'
-#' @examples
-#' returnAKIpatients(toy)
+library(DT)
+library(data.table)
+library(tidyverse)
+library(zoo)
+library(akiFlagger)
 
 returnAKIpatients <- function(dataframe, HB_trumping = FALSE, eGFR_impute = FALSE,
                               window1 = as.difftime(2, units='days'), window2 = as.difftime(7, units='days'),
@@ -46,7 +13,7 @@ returnAKIpatients <- function(dataframe, HB_trumping = FALSE, eGFR_impute = FALS
   age <- sex <- race <- NULL # Add a visible binding (even if it's null) so R CMD Check doesn't complain
   patient_id <- inpatient <- creatinine <- time <- NULL
   min_creat48 <- min_creat7d <- baseline_creat <- aki <- NULL # Also, erase any variables in case duplicate variable names coexist
-  delta_t <- inp_lead <- imputed_admission <- imputed_encounter_id <- c1c2 <- admit_mask <- NULL
+  delta_t <- inp_lag <- inp_lead <- imputed_admission <- imputed_encounter_id <- NULL
   window1 <- window1 + padding
   window2 <- window2 + padding
 
@@ -63,13 +30,9 @@ returnAKIpatients <- function(dataframe, HB_trumping = FALSE, eGFR_impute = FALS
 
   }
 
-  if (eGFR_impute) { # Select columns of interest
-    df <- dataframe[, list(patient_id, inpatient, creatinine, time, age, sex, race)]
-    }
-  else df <- dataframe[, list(patient_id, inpatient, creatinine, time)]
-
-  df <- df[!duplicated(df[, list(patient_id, inpatient, creatinine, time)])] # Remove duplicated rows
-  df <- df[order(time), .SD, by = patient_id] # Sort by time
+  df <- dataframe[, list(patient_id, inpatient, creatinine, time)] # Select the columns of interest
+  df <- df[!duplicated(df)] # Remove duplicated rows
+  df <- df[order(time), .SD ,by = patient_id]
 
   # Rolling minimum creatinine values in the past 48 hours and 7 days, respectively
   df[, min_creat48 := sapply(.SD[, time], function(x) min(creatinine[between(.SD[, time], x - window1, x)])), by=patient_id]
@@ -80,19 +43,19 @@ returnAKIpatients <- function(dataframe, HB_trumping = FALSE, eGFR_impute = FALS
 
     # Impute estimated admission and encounter columns
     df[, delta_t := shift(time, type = 'lead') - time, by = patient_id] # Time difference between current row and next
+    df[, inp_lag := shift(inpatient, fill = F), by = patient_id] # Inpatient column shifted forward
     df[, inp_lead:= shift(inpatient, type = 'lead'), by = patient_id] # Inpatient column shifted backwards
 
     cond1 <- df[, delta_t] <= 72*3600 # Check to make sure times are within 72 hours (in units of seconds) from each other
     cond2 <- df[, inpatient] & df[, inp_lead] # Ensure that a True is followed by a True (i.e. at least 2 visits)
-    df[, c1c2 := cond1 & cond2]
+    cond3 <- df[, inpatient] & !df[, inp_lag] # Ensure that a True is preceded by a False (i.e. outpatient -> inpatient transition)
 
-    df[, admit_mask := c1c2 & !shift(c1c2, fill = F), by = patient_id] # Admit mask requires F -> T transition
-    df[df$admit_mask, imputed_admission := time] # Impute admission with admit mask times
+    df[cond1 & cond2 & cond3, imputed_admission := time]
     df[, imputed_admission := na.locf(na.locf(imputed_admission, na.rm = F), fromLast = T), by = patient_id] # Forward-fill then back-fill
     df[, imputed_encounter_id := .GRP, by = c('imputed_admission', 'patient_id')] # Group by encounter and count each group
 
-    # Remove delta_t, inp_lag, inp_lead & all_inp from the dataframe
-    df <- df %>% select(-delta_t, -inp_lead, -c1c2, -admit_mask)
+    # Remove delta_t, inp_lag, & inp_lead from the dataframe
+    df <- df %>% select(-delta_t, -inp_lag, -inp_lead)
 
     # Baseline creatinine is defined as the median of the outpatient creatinine values from 365 to 7 days prior to admission
     df[, baseline_creat := .SD[time >= imputed_admission - as.difftime(365, units='days') &
@@ -111,8 +74,8 @@ returnAKIpatients <- function(dataframe, HB_trumping = FALSE, eGFR_impute = FALS
 
       creat_over_kappa <- 75/(141*(1 + 0.018*df[null_bc, sex])*(1 + 0.159*df[null_bc, race])*0.993**df[null_bc, age])
 
-      df[null_bc][creat_over_kappa < 1]$baseline_creat <- kappa[creat_over_kappa < 1]*creat_over_kappa[creat_over_kappa < 1]**(-1/1.209)
-      df[null_bc][creat_over_kappa >=1]$baseline_creat <- kappa[creat_over_kappa >=1]*creat_over_kappa[creat_over_kappa >=1]**(1/alpha[creat_over_kappa >=1])
+      df[null_bc & creat_over_kappa < 1, baseline_creat] <- kappa*creat_over_kappa**(-1/1.209)
+      df[null_bc & creat_over_kappa >=1, baseline_creat] <- kappa*creat_over_kappa**(1/alpha)
 
     }
 
@@ -143,7 +106,6 @@ returnAKIpatients <- function(dataframe, HB_trumping = FALSE, eGFR_impute = FALS
 
     # Now, add the 0.3 bump rolling min condition back in
     mask_empty = df[,aki == 0]
-    mask_2d[is.na(mask_2d)] = FALSE
     mask_rw = (!mask_2d & mask_empty) | bc_mask
     df[mask_rw, aki := condition1[mask_rw]]
 
@@ -164,4 +126,64 @@ returnAKIpatients <- function(dataframe, HB_trumping = FALSE, eGFR_impute = FALS
   if (!add_min_creat) df <- df %>% select(-min_creat48, -min_creat7d)
   if (!add_baseline_creat) df <- df %>% select(-baseline_creat)
   return(df)
+}
+# Define server logic ----
+server <- function(input, output) {
+  
+  # Input will start off as NULL. Once it is uploaded, 
+  # input$file will populate and the file will preview
+  
+  output$previewTable <- renderDT(
+    {
+      req(input$file)
+      
+      # The actual path is in file$datapath
+      df <- fread(input$file$datapath)
+    },
+    options = list(pageLength = 5)
+  )
+  
+  # Text before table 
+  aki_preview_text <- eventReactive(input$calcAKI, {
+    "Returned output:"
+  })
+  
+  aki <- eventReactive(input$calcAKI, {
+    req(input$file)
+    pad_val <- input$padding
+    df <- fread(input$file$datapath)
+    aki <- returnAKIpatients(df, HB_trumping = input$HB_trumping, 
+                      eGFR_impute = input$eGFR_impute, padding = as.difftime(input$padding, units = 'hours'))
+    validate(
+      need(class(aki) == c('data.table', 'data.frame'), aki)
+    )
+    return(aki)
+  })
+  
+  # Rendering outputs:
+  output$aki_preview_text <- renderText({
+    aki_preview_text() # Returned output before the table shows
+  })
+  
+  output$aki <- renderDT({
+    aki() # The actual table
+  },
+  options = list(pageLength = 5)
+  )
+  
+  # Download data
+  output$downloadData <- downloadHandler(
+    filename = function() {
+      paste(substr(input$file$name, 1, nchar(input$file$name) - 4), "_aki.csv", sep = "")
+    },
+    content = function(file) {
+      write.csv(aki(), file, row.names = FALSE)
+    }
+  )
+  
+  output$download <- renderUI({
+    if(!is.null(input$file) & input$calcAKI) {
+      downloadButton('downloadData', 'Download')
+    }
+  })
 }
